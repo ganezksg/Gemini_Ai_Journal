@@ -1,0 +1,31 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    
+    // Default Deny-By-Default: No unauthenticated or unspecified access
+    match /{document=**} {
+      allow read, write: if false;
+    }
+    
+    // User root profile and isolation container
+    match /users/{userId} {
+      // User can only access their own user document
+      allow read, write: if request.auth != null && request.auth.uid == userId;
+      
+      // Multi-turn Journal Sessions
+      match /journals/{journalId} {
+        allow read, write: if request.auth != null && request.auth.uid == userId;
+        
+        // Individual Journal Messages
+        match /messages/{messageId} {
+          allow read, write: if request.auth != null && request.auth.uid == userId;
+        }
+      }
+      
+      // Personal Reflection Intelligence documents
+      match /reflections/{reflectionId} {
+        allow read, write: if request.auth != null && request.auth.uid == userId;
+      }
+    }
+  }
+}
