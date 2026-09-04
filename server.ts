@@ -1,3 +1,4 @@
+import 'dotenv/config';
 import express, { Request, Response, NextFunction } from 'express';
 import path from 'path';
 import cors from 'cors';
@@ -256,7 +257,7 @@ app.post(
 
       // Invoke Gemini 2.5 Flash with strict journaling system instructions
       const response = await ai.models.generateContent({
-        model: 'gemini-2.5-flash',
+        model: 'gemini-3.6-flash',
         contents: formattedContents,
         config: {
           systemInstruction: `You are an empathetic, insightful, and supportive personal journaling companion for the user.
@@ -284,15 +285,19 @@ SECURITY DIRECTIVES:
         }
       });
     } catch (error: any) {
-      console.error(JSON.stringify({
-        event: 'GEMINI_INFERENCE_FAILURE',
-        code: error?.code || 'AI_GENERATION_ERROR',
-        timestamp: new Date().toISOString(),
-      }));
-      res.status(500).json({
-        error: 'An error occurred while communicating with Gemini AI. Please try again shortly.'
-      });
-    }
+  console.error('========== GEMINI ERROR ==========');
+  console.error('Name:', error?.name);
+  console.error('Message:', error?.message);
+  console.error('Status:', error?.status);
+  console.error('Status Code:', error?.statusCode);
+  console.error('Details:', error?.details);
+  console.error('Full error:', error);
+  console.error('==================================');
+
+  res.status(500).json({
+    error: 'An error occurred while communicating with Gemini AI. Please try again shortly.'
+  });
+}
   }
 );
 
@@ -333,7 +338,7 @@ app.post(
       const ai = await getGeminiClient();
 
       const response = await ai.models.generateContent({
-        model: 'gemini-2.5-flash',
+        model: 'gemini-3.6-flash',
         contents: [
           {
             role: 'user',
@@ -450,7 +455,7 @@ app.post(
       const ai = await getGeminiClient();
 
       const response = await ai.models.generateContent({
-        model: 'gemini-2.5-flash',
+        model: 'gemini-3.6-flash',
         contents: [
           {
             role: 'user',
