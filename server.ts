@@ -1,4 +1,3 @@
-import 'dotenv/config';
 import express, { Request, Response, NextFunction } from 'express';
 import path from 'path';
 import cors from 'cors';
@@ -22,10 +21,19 @@ app.use(cors({
 }));
 app.use(express.json({ limit: '256kb' }));
 
+// Authoritative Firebase & Google Cloud Project ID strictly synchronized with client configuration
+const authoritativeProjectId = firebaseConfig.projectId || 'footnote-507318';
+
+// Sanitize process environment to prevent any stale container variables (e.g. footnote-75330)
+// from overriding the authoritative application project ID
+process.env.FIREBASE_PROJECT_ID = authoritativeProjectId;
+process.env.GCLOUD_PROJECT = authoritativeProjectId;
+process.env.GOOGLE_CLOUD_PROJECT = authoritativeProjectId;
+
 // Initialize Firebase Admin SDK for authoritative token verification
 const adminApp: App = getApps().length === 0
   ? initializeApp({
-      projectId: process.env.FIREBASE_PROJECT_ID || firebaseConfig.projectId,
+      projectId: authoritativeProjectId,
     })
   : getApp();
 
@@ -113,7 +121,7 @@ async function authenticateFirebaseUser(req: Request, res: Response, next: NextF
 
   try {
     // Cryptographically verify signature, claims, expiration, issuer, and project audience
-    const decodedToken = await adminAuth.verifyIdToken(token, true);
+    const decodedToken = await adminAuth.verifyIdToken(token);
 
     if (!decodedToken || !decodedToken.uid) {
       res.status(401).json({ error: 'Unauthorized: Invalid token claims' });
@@ -141,6 +149,7 @@ async function authenticateFirebaseUser(req: Request, res: Response, next: NextF
 // Google Cloud Secret Manager & Runtime Credential Resolver
 let cachedGeminiApiKey: string | null = null;
 let secretManagerClient: SecretManagerServiceClient | null = null;
+let secretManagerDisabled = false;
 
 async function resolveGeminiApiKey(): Promise<string> {
   if (cachedGeminiApiKey) {
@@ -150,7 +159,7 @@ async function resolveGeminiApiKey(): Promise<string> {
   const secretName = process.env.GEMINI_SECRET_NAME;
 
   // 1. If GEMINI_SECRET_NAME is provided, fetch via Google Cloud Secret Manager using Application Default Credentials
-  if (secretName) {
+  if (secretName && !secretManagerDisabled) {
     try {
       if (!secretManagerClient) {
         secretManagerClient = new SecretManagerServiceClient();
@@ -158,9 +167,12 @@ async function resolveGeminiApiKey(): Promise<string> {
 
       const resourceName = secretName.startsWith('projects/')
         ? secretName
-        : `projects/${process.env.GOOGLE_CLOUD_PROJECT || firebaseConfig.projectId}/secrets/${secretName}/versions/latest`;
+        : `projects/${authoritativeProjectId}/secrets/${secretName}/versions/latest`;
 
-      const [version] = await secretManagerClient.accessSecretVersion({ name: resourceName });
+      const [version] = await secretManagerClient.accessSecretVersion(
+        { name: resourceName },
+        { timeout: 3000 }
+      );
       const payload = version.payload?.data?.toString();
 
       if (payload && payload.trim().length > 0) {
@@ -168,9 +180,13 @@ async function resolveGeminiApiKey(): Promise<string> {
         return cachedGeminiApiKey;
       }
     } catch (smError: any) {
-      console.error(JSON.stringify({
-        event: 'SECRET_MANAGER_FETCH_ERROR',
-        code: smError?.code || 'SECRET_ERROR',
+      // If permission denied (code 7) or secret not found (code 5), disable Secret Manager queries to avoid delaying requests
+      if (smError?.code === 7 || smError?.code === 5) {
+        secretManagerDisabled = true;
+      }
+      console.warn(JSON.stringify({
+        event: 'SECRET_MANAGER_RESOLVE_FALLBACK',
+        code: smError?.code || 'SECRET_UNAVAILABLE',
         status: 'FALLBACK_EVALUATION',
       }));
     }
@@ -189,6 +205,93 @@ async function resolveGeminiApiKey(): Promise<string> {
 async function getGeminiClient(): Promise<GoogleGenAI> {
   const apiKey = await resolveGeminiApiKey();
   return new GoogleGenAI({ apiKey });
+}
+
+/**
+ * Safely parse JSON from LLM responses, stripping code fences or finding enclosed objects/arrays.
+ */
+function safeParseJson<T>(rawText: string | undefined | null, fallback: T): T {
+  if (!rawText || typeof rawText !== 'string') return fallback;
+  const trimmed = rawText.trim();
+  try {
+    return JSON.parse(trimmed);
+  } catch {
+    // Strip markdown code fences if present (e.g. ```json ... ```)
+    const stripped = trimmed
+      .replace(/^```(?:json)?\s*/i, '')
+      .replace(/\s*```$/i, '')
+      .trim();
+    try {
+      return JSON.parse(stripped);
+    } catch {
+      // Match outermost JSON object or array
+      const match = stripped.match(/(\{[\s\S]*\}|\[[\s\S]*\])/);
+      if (match) {
+        try {
+          return JSON.parse(match[1]);
+        } catch {
+          // Fall through
+        }
+      }
+      return fallback;
+    }
+  }
+}
+
+/**
+ * Execute Gemini generateContent with transient error retry and model fallback.
+ * Automatically retries on 503 (model high demand) and falls back to
+ * alternative active models ('gemini-3.1-flash-lite', 'gemini-flash-latest')
+ * if a specific model encounters quota exhaustion or availability issues.
+ */
+async function generateContentWithResilience(
+  ai: GoogleGenAI,
+  params: {
+    model: string;
+    contents: any;
+    config?: any;
+  }
+) {
+  const models: string[] = [params.model];
+  for (const fallbackModel of ['gemini-3.1-flash-lite', 'gemini-flash-latest']) {
+    if (!models.includes(fallbackModel)) {
+      models.push(fallbackModel);
+    }
+  }
+
+  let lastError: any = null;
+
+  for (const modelCandidate of models) {
+    for (let attempt = 1; attempt <= 2; attempt++) {
+      try {
+        const response = await ai.models.generateContent({
+          ...params,
+          model: modelCandidate,
+        });
+        return response;
+      } catch (err: any) {
+        lastError = err;
+        const statusCode = err?.status || err?.error?.code || err?.statusCode;
+        const isQuotaExhausted =
+          statusCode === 429 &&
+          (String(err?.message || '').includes('Quota exceeded') ||
+            String(err?.message || '').includes('RESOURCE_EXHAUSTED') ||
+            String(err?.error?.message || '').includes('Quota exceeded'));
+        const isTransientDemand = statusCode === 503 || statusCode === 500;
+
+        // If it's a transient server error, wait briefly and retry once on this model
+        if (isTransientDemand && attempt < 2) {
+          await new Promise((resolve) => setTimeout(resolve, 1000 * attempt));
+          continue;
+        }
+
+        // If quota is exhausted on this model or transient retry failed, immediately switch to next model
+        break;
+      }
+    }
+  }
+
+  throw lastError;
 }
 
 // -------------------------------------------------------------
@@ -255,9 +358,9 @@ app.post(
         parts: [{ text: message.trim() }],
       });
 
-      // Invoke Gemini 2.5 Flash with strict journaling system instructions
-      const response = await ai.models.generateContent({
-        model: 'gemini-3.6-flash',
+      // Invoke Gemini with resilience and automatic fallback
+      const response = await generateContentWithResilience(ai, {
+        model: 'gemini-3.8-flash',
         contents: formattedContents,
         config: {
           systemInstruction: `You are an empathetic, insightful, and supportive personal journaling companion for the user.
@@ -285,19 +388,20 @@ SECURITY DIRECTIVES:
         }
       });
     } catch (error: any) {
-  console.error('========== GEMINI ERROR ==========');
-  console.error('Name:', error?.name);
-  console.error('Message:', error?.message);
-  console.error('Status:', error?.status);
-  console.error('Status Code:', error?.statusCode);
-  console.error('Details:', error?.details);
-  console.error('Full error:', error);
-  console.error('==================================');
-
-  res.status(500).json({
-    error: 'An error occurred while communicating with Gemini AI. Please try again shortly.'
-  });
-}
+      const statusCode = error?.status || error?.error?.code || error?.statusCode;
+      console.error(JSON.stringify({
+        event: 'GEMINI_INFERENCE_FAILURE',
+        status: statusCode || 'AI_GENERATION_ERROR',
+        message: error?.message ? String(error.message).slice(0, 200) : 'Generation error',
+        timestamp: new Date().toISOString(),
+      }));
+      const userMsg = statusCode === 503
+        ? 'The AI companion is experiencing high demand. Please try again shortly.'
+        : 'An error occurred while communicating with Gemini AI. Please try again shortly.';
+      res.status(statusCode === 503 ? 503 : 500).json({
+        error: userMsg
+      });
+    }
   }
 );
 
@@ -337,8 +441,8 @@ app.post(
 
       const ai = await getGeminiClient();
 
-      const response = await ai.models.generateContent({
-        model: 'gemini-3.6-flash',
+      const response = await generateContentWithResilience(ai, {
+        model: 'gemini-3.8-flash',
         contents: [
           {
             role: 'user',
@@ -393,7 +497,7 @@ SECURITY DIRECTIVES:
         }
       });
 
-      const parsedJson = JSON.parse(response.text || '{}');
+      const parsedJson = safeParseJson<any>(response.text, {});
 
       const summary = {
         summaryText: String(parsedJson.summaryText || 'Reflection session completed.').trim(),
@@ -407,13 +511,18 @@ SECURITY DIRECTIVES:
 
       res.json({ summary });
     } catch (error: any) {
+      const statusCode = error?.status || error?.error?.code || error?.statusCode;
       console.error(JSON.stringify({
         event: 'SUMMARIZE_GENERATION_FAILURE',
-        code: error?.code || 'SUMMARY_ERROR',
+        status: statusCode || 'SUMMARY_ERROR',
+        message: error?.message ? String(error.message).slice(0, 200) : 'Summary error',
         timestamp: new Date().toISOString(),
       }));
-      res.status(500).json({
-        error: 'Failed to generate journal summary. Please try again.'
+      const userMsg = statusCode === 503
+        ? 'The reflection summarizer is experiencing high demand. Please try again in a moment.'
+        : 'Failed to generate journal summary. Please try again.';
+      res.status(statusCode === 503 ? 503 : 500).json({
+        error: userMsg
       });
     }
   }
@@ -454,8 +563,8 @@ app.post(
 
       const ai = await getGeminiClient();
 
-      const response = await ai.models.generateContent({
-        model: 'gemini-3.6-flash',
+      const response = await generateContentWithResilience(ai, {
+        model: 'gemini-3.8-flash',
         contents: [
           {
             role: 'user',
@@ -531,7 +640,7 @@ SECURITY DIRECTIVES:
         }
       });
 
-      const parsed = JSON.parse(response.text || '{}');
+      const parsed = safeParseJson<any>(response.text, {});
 
       const report = {
         generatedAt: Date.now(),
@@ -544,13 +653,122 @@ SECURITY DIRECTIVES:
 
       res.json({ report });
     } catch (error: any) {
+      const statusCode = error?.status || error?.error?.code || error?.statusCode;
       console.error(JSON.stringify({
         event: 'REFLECTION_ANALYSIS_FAILURE',
-        code: error?.code || 'ANALYSIS_ERROR',
+        status: statusCode || 'ANALYSIS_ERROR',
+        message: error?.message ? String(error.message).slice(0, 200) : 'Analysis error',
         timestamp: new Date().toISOString(),
       }));
-      res.status(500).json({
-        error: 'Failed to synthesize reflection intelligence. Please try again.'
+      const userMsg = statusCode === 503
+        ? 'The reflection intelligence model is experiencing high demand. Please try again in a few moments.'
+        : 'Failed to synthesize reflection intelligence. Please try again.';
+      res.status(statusCode === 503 ? 503 : 500).json({
+        error: userMsg
+      });
+    }
+  }
+);
+
+import {
+  INTEREST_MAP_SYSTEM_INSTRUCTION,
+  INTEREST_MAP_RESPONSE_SCHEMA,
+  enforceSafeInterestMapAbstraction,
+} from './src/shared/privacyPipeline';
+
+// Authenticated Route: Extract Dynamic Interest Map Topics from User Reflections (Stage 2A with Privacy Abstraction)
+app.post(
+  '/api/interests/extract',
+  authenticateFirebaseUser,
+  authenticatedRateLimiter(15, 60000),
+  async (req: Request, res: Response): Promise<void> => {
+    try {
+      const { journals, existingTopicNames } = req.body;
+
+      if (!Array.isArray(journals) || journals.length === 0) {
+        res.status(400).json({ error: 'At least one journal entry is required for interest extraction' });
+        return;
+      }
+
+      const sanitizedExistingTopics = Array.isArray(existingTopicNames)
+        ? existingTopicNames.filter((t: any) => typeof t === 'string' && t.trim().length > 0).map((t: string) => t.trim().slice(0, 50))
+        : [];
+
+      // Bound to most recent 30 reflections to prevent excessive payload and token costs
+      const sanitizedJournals = journals.slice(-30).map((j: any) => ({
+        title: typeof j.title === 'string' ? j.title.slice(0, 100) : 'Journal Entry',
+        date: typeof j.createdAt === 'number' ? new Date(j.createdAt).toISOString().split('T')[0] : 'Recent',
+        summary: typeof j.summaryText === 'string' ? j.summaryText.slice(0, 1000) : '',
+        mood: typeof j.mood === 'string' ? j.mood.slice(0, 50) : 'Reflective',
+        themes: Array.isArray(j.keyThemes) ? j.keyThemes.map((t: any) => String(t).slice(0, 40)) : [],
+      })).filter((j: any) => j.summary.length > 0 || j.themes.length > 0);
+
+      if (sanitizedJournals.length === 0) {
+        res.status(400).json({ error: 'No reflections with readable summaries or themes found' });
+        return;
+      }
+
+      const summariesText = sanitizedJournals
+        .map((j: any, idx: number) => `Entry #${idx + 1} (${j.date} - ${j.title}):\nMood: ${j.mood}\nThemes: ${j.themes.join(', ')}\nSummary: ${j.summary}`)
+        .join('\n\n---\n\n');
+
+      const existingTopicsSection = sanitizedExistingTopics.length > 0
+        ? `\n\nEXISTING CANONICAL TOPICS IN USER'S MAP (prefer these exact names if concepts re-occur):\n${sanitizedExistingTopics.join(', ')}`
+        : '';
+
+      const ai = await getGeminiClient();
+
+      const response = await generateContentWithResilience(ai, {
+        model: 'gemini-3.8-flash',
+        contents: [
+          {
+            role: 'user',
+            parts: [
+              {
+                text: `Analyze the following private personal journal entries belonging to the authenticated user.
+Translate their thoughts, themes, and reflection patterns into a safe, generalized Interest Map conforming to SAFE_INTEREST_MAP_SCHEMA.
+Total journal entries in this dataset: ${sanitizedJournals.length}.
+Ensure topic consolidation (converging similar concepts into canonical topics) and accurate frequency counts across entries (1 to ${sanitizedJournals.length}).
+Subtopics MUST represent specific concepts and MUST NOT be semantically equivalent to their parent (e.g. for Technology & Building -> 'AI Development', 'Firebase', 'Software Projects', NOT 'Technology').${existingTopicsSection}
+
+JOURNAL ENTRIES DATASET:
+${summariesText}`
+              }
+            ]
+          }
+        ],
+        config: {
+          systemInstruction: INTEREST_MAP_SYSTEM_INSTRUCTION,
+          responseMimeType: 'application/json',
+          responseSchema: INTEREST_MAP_RESPONSE_SCHEMA,
+          temperature: 0.3,
+          maxOutputTokens: 2048,
+        }
+      });
+
+      const parsed = safeParseJson<any>(response.text, {});
+
+      // Enforce SAFE_INTEREST_MAP_SCHEMA, topic consolidation & defense-in-depth sanitization before returning to frontend
+      const interestMap = enforceSafeInterestMapAbstraction(
+        parsed,
+        sanitizedJournals.length,
+        sanitizedExistingTopics
+      );
+
+      res.json({ interestMap });
+    } catch (error: any) {
+      const statusCode = error?.status || error?.error?.code || error?.statusCode;
+      console.error(JSON.stringify({
+        event: 'INTEREST_EXTRACTION_FAILURE',
+        status: statusCode || 'EXTRACTION_ERROR',
+        message: error?.message ? String(error.message).slice(0, 200) : 'Extraction error',
+        timestamp: new Date().toISOString(),
+      }));
+      const userMsg = statusCode === 503
+        ? 'The interest map model is currently experiencing high demand. Please try again in a few moments.'
+        : 'Failed to extract interests from journal reflections. Please try again.';
+      res.status(statusCode === 503 ? 503 : 500).json({
+        error: userMsg
       });
     }
   }

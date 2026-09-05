@@ -58,21 +58,21 @@ export const LoginScreen: React.FC = () => {
   };
 
   return (
-    <div className="min-h-screen bg-stone-50 flex flex-col justify-center py-12 sm:px-6 lg:px-8">
+    <div className="min-h-screen bg-[#FAF8F5] flex flex-col justify-center py-12 sm:px-6 lg:px-8">
       <div className="sm:mx-auto sm:w-full sm:max-w-md text-center">
-        <div className="inline-flex items-center justify-center w-14 h-14 rounded-2xl bg-amber-900/10 text-amber-900 mb-4 border border-amber-900/20">
-          <Shield className="w-7 h-7 text-amber-900" />
+        <div className="inline-flex items-center justify-center w-14 h-14 rounded-2xl bg-[#324C3D] text-[#E8F3EB] mb-4 shadow-sm border border-[#24382C]">
+          <span className="text-2xl">🌱</span>
         </div>
-        <h1 className="text-3xl font-serif font-medium text-stone-900 tracking-tight">
-          Personal Gemini Journal
+        <h1 className="text-3xl font-serif font-bold text-[#1E2922] tracking-wide">
+          EMORA
         </h1>
-        <p className="mt-2 text-sm text-stone-600 max-w-sm mx-auto">
-          Private, zero-knowledge reflection space guarded by per-user Firestore isolation.
+        <p className="mt-2 text-xs sm:text-sm text-[#6C7B71] max-w-sm mx-auto">
+          A personal, botanical reflection space guarded by private per-user isolation.
         </p>
       </div>
 
       <div className="mt-8 sm:mx-auto sm:w-full sm:max-w-md">
-        <div className="bg-white py-8 px-6 shadow-sm border border-stone-200 rounded-2xl sm:px-10">
+        <div className="bg-white py-8 px-6 shadow-xs border border-[#ECE6DC] rounded-3xl sm:px-10">
           {error && (
             <div className="mb-6 p-3.5 bg-rose-50 border border-rose-200 text-rose-800 text-sm rounded-xl">
               {error}
@@ -163,7 +163,7 @@ export const LoginScreen: React.FC = () => {
                 minLength={6}
                 value={password}
                 onChange={(e) => setPassword(e.target.value)}
-                className="w-full px-3.5 py-2.5 rounded-xl border border-stone-300 text-stone-900 placeholder-stone-400 focus:outline-none focus:ring-2 focus:ring-amber-900/20 focus:border-amber-900 text-sm"
+                className="w-full px-3.5 py-2.5 rounded-2xl border border-[#E5DFD5] bg-[#F6F3EE] text-[#1E2922] placeholder-[#8A988D] focus:outline-none focus:ring-2 focus:ring-[#324C3D]/20 focus:border-[#324C3D] text-xs"
                 placeholder="••••••••"
               />
             </div>
@@ -172,7 +172,7 @@ export const LoginScreen: React.FC = () => {
               id="submit-auth-button"
               type="submit"
               disabled={loading}
-              className="w-full mt-2 py-3 px-4 rounded-xl bg-amber-900 text-amber-50 font-medium hover:bg-amber-950 active:bg-black transition-colors disabled:opacity-50 text-sm flex items-center justify-center gap-2 shadow-sm"
+              className="w-full mt-2 py-3 px-4 rounded-2xl bg-[#324C3D] text-white font-medium hover:bg-[#23372B] active:bg-[#16251D] transition-colors disabled:opacity-50 text-xs flex items-center justify-center gap-2 shadow-xs"
             >
               {loading ? (
                 'Processing...'

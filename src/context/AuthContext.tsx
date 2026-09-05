@@ -78,8 +78,11 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
   };
 
   const getIdToken = async (): Promise<string | null> => {
+    if (typeof auth.authStateReady === 'function') {
+      await auth.authStateReady();
+    }
     if (!auth.currentUser) return null;
-    return await auth.currentUser.getIdToken(false);
+    return await auth.currentUser.getIdToken();
   };
 
   return (

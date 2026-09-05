@@ -107,3 +107,68 @@ export interface ApiErrorResponse {
   error: string;
   code?: string;
 }
+
+/**
+ * SAFE_INTEREST_MAP_SCHEMA
+ * 
+ * Privacy-Preserving Abstraction Schema for the Interest Map.
+ * 
+ * CORE PRIVACY DIRECTIVES:
+ * 1. Contains ONLY derived safe topic IDs, safe names, frequencies, broad categories,
+ *    generic descriptions, and inter-topic relationships.
+ * 2. STRICTLY EXCLUDES: raw journal text, excerpts, quotes, sensitive keywords,
+ *    specific medical diagnoses, financial details, intimate/sexual subjects,
+ *    and identifiable personal names or PII.
+ * 3. Safe topics represent broad thematic patterns suitable for public visualization.
+ */
+export interface SafeInterestSubtopic {
+  id: string;
+  name: string;
+  frequency: number;
+  description: string;
+  prompt: string;
+}
+
+export interface SafeInterestTopic {
+  id: string;
+  name: string;
+  frequency: number;
+  category: string;
+  description: string;
+  subtopics: SafeInterestSubtopic[];
+}
+
+export interface SafeInterestRelationship {
+  fromTopicId: string;
+  toTopicId: string;
+  relationship?: string;
+}
+
+export interface SafeInterestMapData {
+  topics: SafeInterestTopic[];
+  relatedConnections?: SafeInterestRelationship[];
+  totalReflectionsAnalyzed: number;
+  generatedAt: number;
+  privacyAbstractionVersion: string;
+}
+
+// Backward-compatible type aliases for existing components
+export type InterestSubtopic = SafeInterestSubtopic;
+export type InterestTopic = SafeInterestTopic;
+export type InterestRelationship = SafeInterestRelationship;
+export type InterestMapData = SafeInterestMapData;
+
+export interface ExtractInterestsRequest {
+  journals: Array<{
+    title: string;
+    createdAt: number;
+    summaryText: string;
+    keyThemes: string[];
+    mood?: string;
+  }>;
+  existingTopicNames?: string[];
+}
+
+export interface ExtractInterestsResponse {
+  interestMap: SafeInterestMapData;
+}
